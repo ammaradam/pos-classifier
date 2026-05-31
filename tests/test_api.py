@@ -28,7 +28,13 @@ def _make_mock_predictor(category: str = "Beverages", confidence: float = 0.95) 
             predicted_at=datetime.now(timezone.utc),
         )
     ]
-    pred.record_feedback.return_value = None
+
+    def mock_record_feedback(description: str, corrected: str, original: str | None) -> None:
+        from pos_classifier.config import LABEL_MAP
+        if corrected not in LABEL_MAP:
+            raise ValueError(f"Invalid category '{corrected}'. Valid: {list(LABEL_MAP.keys())}")
+
+    pred.record_feedback.side_effect = mock_record_feedback
     return pred
 
 
@@ -125,3 +131,15 @@ class TestMetrics:
         resp = client.get("/metrics")
         assert resp.status_code == 200
         assert b"pos_classifier" in resp.content
+
+
+class TestContract:
+    def test_openapi_contract_export(self, client):
+        resp = client.get("/contract")
+        assert resp.status_code == 200
+        schema = resp.json()
+        assert schema["openapi"] == "3.1.0"
+        assert "paths" in schema
+        assert "/predict" in schema["paths"]
+        assert "/feedback" in schema["paths"]
+        assert schema["info"]["title"] == "POS Product Classifier"

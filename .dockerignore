@@ -1,0 +1,13 @@
+.venv/
+.git/
+.pytest_cache/
+.streamlit/
+__pycache__/
+*.pyc
+data/
+model/
+mlruns/
+notebooks/
+docs/
+tests/
+openapi.json

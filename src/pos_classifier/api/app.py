@@ -48,6 +48,11 @@ FEEDBACK_COUNT = Counter(
     "pos_classifier_feedback_total",
     "Human feedback submissions received",
 )
+VALIDATION_ERROR_COUNT = Counter(
+    "pos_classifier_validation_errors_total",
+    "Schema validation failures",
+    ["endpoint", "error_type"],
+)
 
 
 def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
@@ -158,20 +163,25 @@ def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
     # ── Human feedback ────────────────────────────────────────────────────────
     @app.post("/feedback", tags=["feedback"], status_code=204)
     def feedback(req: FeedbackRequest):
-        if req.corrected_category not in LABEL_MAP:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unknown category '{req.corrected_category}'. "
-                f"Valid: {list(LABEL_MAP.keys())}",
-            )
         predictor = _get_predictor(cfg)
-        predictor.record_feedback(
-            req.product_description,
-            req.corrected_category,
-            req.original_prediction,
-        )
+        try:
+            predictor.record_feedback(
+                req.product_description,
+                req.corrected_category,
+                req.original_prediction,
+            )
+        except ValueError as exc:
+            VALIDATION_ERROR_COUNT.labels(endpoint="feedback", error_type="invalid_category").inc()
+            logger.warning("Feedback validation error: %s", exc)
+            raise HTTPException(status_code=422, detail=str(exc))
         FEEDBACK_COUNT.inc()
         logger.info("Feedback received for %r → %s", req.product_description[:60], req.corrected_category)
+
+    # ── Contract export ──────────────────────────────────────────────────────────
+    @app.get("/contract", tags=["ops"], include_in_schema=False)
+    def contract():
+        """Export OpenAPI schema for contract versioning and client generation."""
+        return app.openapi()
 
     # ── Prometheus metrics ────────────────────────────────────────────────────
     @app.get("/metrics", tags=["ops"], include_in_schema=False)

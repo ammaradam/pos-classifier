@@ -32,7 +32,7 @@ POST /predict ──────────────────────
                when feedback ≥ 500 → retrain trigger
 ```
 
-See [doc/architecture.md](doc/architecture.md) for the full system diagram and [doc/deployment_flowchart.md](doc/deployment_flowchart.md) for the Kubernetes / GCP deployment design.
+See [docs/architecture.md](docs/architecture.md) for the full system diagram and [docs/deployment_flowchart.md](docs/deployment_flowchart.md) for the Kubernetes / GCP deployment design.
 
 ## Quickstart
 
@@ -251,7 +251,48 @@ docker compose --profile serve up
 | `/predict/batch` | POST | Batch classification (max 512) |
 | `/feedback` | POST | Submit human-verified label |
 | `/metrics` | GET | Prometheus metrics |
+| `/contract` | GET | OpenAPI schema (JSON) for contract versioning |
 | `/docs` | GET | Swagger UI |
+
+### Data Contract & Validation
+
+The API enforces a strict data contract via Pydantic schemas:
+
+**Request validation:**
+- `product_description`: 1–500 characters (required)
+- Batch size: 1–512 items per request
+- All validation errors return `422 Unprocessable Entity` with details
+
+**Response schema:**
+- Single prediction: `PredictResponse` with category, confidence (0–1), flagged_for_human_review, model_version, predicted_at
+- Batch prediction: `BatchPredictResponse` with results array and total count
+
+**Feedback validation:**
+- `corrected_category` must be one of the 5 defined labels (validated at the Predictor layer, not API layer)
+- Invalid categories return `422 Unprocessable Entity` with list of valid options
+
+**Contract export:**
+```bash
+curl http://localhost:8000/contract > openapi.json
+```
+This endpoint returns the full OpenAPI 3.1.0 schema, enabling downstream teams to:
+- Generate type-safe client SDKs (e.g., OpenAPI Generator)
+- Detect breaking changes in API updates
+- Validate payloads offline before submission
+
+### Monitoring & Error Tracking
+
+Prometheus metrics track data quality and validation failures:
+- `pos_classifier_validation_errors_total` — schema validation failures by endpoint and error type
+- `pos_classifier_requests_total` — total predictions by endpoint and category
+- `pos_classifier_flagged_total` — predictions flagged for human review
+- `pos_classifier_feedback_total` — human feedback submissions
+- `pos_classifier_request_latency_seconds` — prediction latency histogram
+
+Example: Track validation errors over time:
+```promql
+rate(pos_classifier_validation_errors_total[5m])
+```
 
 ## Project Structure
 
@@ -279,7 +320,7 @@ tests/
 ├── test_schema.py
 └── test_api.py
 
-doc/
+docs/
 ├── architecture.md          ← System design + data flow diagrams
 └── deployment_flowchart.md  ← Kubernetes + GCP deployment design
 ```
@@ -317,6 +358,7 @@ Key environment variables:
 
 ## Deployment
 
-See [doc/deployment_flowchart.md](doc/deployment_flowchart.md) for:
-- Kubernetes deployment with HPA, CronJob training, Prometheus monitoring
-- Optional GCP architecture with GKE, Cloud Storage, Vertex AI Pipelines, BigQuery
+See [docs/deployment_flowchart.md](docs/deployment_flowchart.md) for:
+- Kubernetes deployment with HPA, CronJob training, model registry promotion, and Prometheus/Grafana monitoring
+- Monitoring and feedback flow with about 20% human verification and retraining triggers
+- Optional GCP architecture with GKE, Cloud SQL, Cloud Storage, Vertex AI Pipelines, Pub/Sub, and BigQuery

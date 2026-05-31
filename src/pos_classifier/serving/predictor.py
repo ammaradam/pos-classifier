@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from pos_classifier.config import ID_TO_LABEL, NUM_LABELS
+from pos_classifier.config import ID_TO_LABEL, LABEL_MAP, NUM_LABELS
 from pos_classifier.serving.schema import PredictResponse
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,8 @@ class Predictor:
             logger.exception("Failed to persist predictions to DB.")
 
     def record_feedback(self, description: str, corrected: str, original: Optional[str]) -> None:
+        if corrected not in LABEL_MAP:
+            raise ValueError(f"Invalid category '{corrected}'. Valid: {list(LABEL_MAP.keys())}")
         now = datetime.now(timezone.utc).isoformat()
         try:
             conn = sqlite3.connect(self.db_path)

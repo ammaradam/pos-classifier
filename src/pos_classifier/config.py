@@ -1,5 +1,6 @@
 """Training and serving configuration."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,7 +64,7 @@ class TrainingConfig:
     review_sample_rate: float = 0.20   # fraction of predictions sent for human review
 
     # Experiment tracking
-    mlflow_tracking_uri: str = "mlruns"
+    mlflow_tracking_uri: str = field(default_factory=lambda: os.getenv("MLFLOW_TRACKING_URI", "mlruns"))
     mlflow_experiment: str = "pos-classifier"
 
     # Subset for quick smoke-test (0 = use all data)

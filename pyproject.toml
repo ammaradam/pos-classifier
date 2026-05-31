@@ -6,8 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # ML core
-    "torch>=2.2.0",
-    "torchvision>=0.17.0",
     "transformers>=4.40.0",
     "accelerate>=0.29.0",
     "scikit-learn>=1.4.0",
@@ -34,6 +32,14 @@ dependencies = [
     "seaborn>=0.13.0",
 ]
 
+[project.optional-dependencies]
+cpu = [
+    "torch>=2.6.0",
+]
+gpu = [
+    "torch>=2.6.0",
+]
+
 [project.scripts]
 pos-classifier = "pos_classifier.__main__:main"
 
@@ -55,14 +61,15 @@ dev-dependencies = [
     "httpx>=0.27.0",
 ]
 
-# ── GPU / CUDA PyTorch ────────────────────────────────────────────────────────
-# RTX 3050 (CUDA 12.7 driver) — cu124 gives torch>=2.6, removing the need for
-# the model_revision workaround (CVE-2025-32434 .bin restriction).
-# To revert to CPU-only: comment out the two sections below and run `uv sync`.
+# ── PyTorch variants ──────────────────────────────────────────────────────────
+# Keep Torch as an explicit extra so local CPU installs and Docker GPU installs
+# do not accidentally pull the wrong multi-GB wheel set.
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+]
 
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
