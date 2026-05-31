@@ -1,10 +1,10 @@
 # POS Product Category Classifier
 
-A production-ready machine learning library that classifies retail Point-of-Sale (POS) product descriptions into predefined product groups. Built on fine-tuned BERT-tiny, with FastAPI serving, MLflow experiment tracking, Prometheus monitoring, and a Streamlit dashboard.
+An end-to-end machine learning service prototype that classifies retail Point-of-Sale (POS) product descriptions into predefined product groups. Built on fine-tuned BERT-tiny, with FastAPI serving, MLflow experiment tracking, Prometheus monitoring, and a Streamlit dashboard.
 
 ## Problem
 
-Retail POS data contains free-text product descriptions that must be mapped to a taxonomy of product groups. This library automates that classification (∼80% of cases) and routes uncertain predictions to human reviewers (∼20%), feeding a continuous-improvement loop.
+Retail POS data contains free-text product descriptions that must be mapped to a taxonomy of product groups. This service automates classification, logs predictions, sends low-confidence and sampled predictions for human review, and feeds verified labels back into a retraining loop.
 
 **5 Product Categories:**
 - Dry Goods & Pantry Staples
@@ -41,9 +41,13 @@ See [docs/architecture.md](docs/architecture.md) for the full system diagram and
 ```bash
 # Requires Python 3.11+
 pip install uv
-uv sync
+uv sync --extra cpu
 uv pip install -e .
 ```
+
+Expected local data files:
+- `data/Training_data.csv` for model training
+- `data/Query_and_Validation_data.csv` for validation, monitoring, and dashboard metrics
 
 ### 2. Train
 
@@ -124,21 +128,21 @@ The Streamlit dashboard shows:
 
 ## Model Versioning & Stage Transitions
 
-All trained models are automatically registered to the **MLflow Model Registry** for production deployment and versioning.
+Training logs experiment metrics and attempts to register the best model in the **MLflow Model Registry** for versioning. The local API serves the trained artifact under `model/best_model`; the production deployment plan describes how to promote and roll out an approved registry version.
 
 ### Stage Workflow
 
 ```
-Train → Auto-register (v1)
+Train → Log run + attempt registry registration (v1)
         ↓
 Manual: transition v1 to Staging (for validation)
         ↓
 Manual: transition v1 to Production (when approved)
 ```
 
-### Auto-registration on training
+### Registration during training
 
-When training completes, the best model is automatically registered to the MLflow Model Registry with metrics as the description:
+When training completes, the best model is saved locally and registration is attempted in the MLflow Model Registry with metrics as the description. Registration failure is non-fatal, so the local model artifact can still be served.
 
 ```bash
 python -m pos_classifier train --epochs 5
@@ -198,12 +202,7 @@ python -m pos_classifier transition --version 2 --stage Production
 #   Stage   : Production
 ```
 
-The API automatically loads the **Production** stage model on startup. If you serve a specific version:
-
-```python
-# In serving/predictor.py, the Predictor uses Production stage by default
-# To serve a Staging model instead, manually specify the version URI in MLflow
-```
+The local API loads the model artifact from `model/best_model` on startup. In production, the serving deployment should fetch the approved **Production** model version from the registry or object storage before pods become ready.
 
 ### View all model versions
 
@@ -337,7 +336,7 @@ uv run pytest tests/ -v
 |----------|-------|
 | Base model | `prajjwal1/bert-tiny` |
 | Parameters | 4.4 million |
-| Max sequence length | 128 tokens |
+| Max sequence length | 64 tokens during training; serving pads to 128 tokens |
 | Training data | ~42,000 rows (after cleaning) |
 | Split | 80% train / 10% val / 10% test |
 | Optimizer | AdamW, lr=2e-5, weight_decay=0.01 |
