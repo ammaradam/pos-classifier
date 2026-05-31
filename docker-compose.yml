@@ -1,0 +1,56 @@
+version: "3.9"
+
+# Shared volume for model artifacts, SQLite DB, and MLflow runs
+volumes:
+  model_data:
+  mlruns_data:
+
+services:
+
+  # ── Training job (run once, exits when done) ──────────────────────────────
+  trainer:
+    build: .
+    image: pos-classifier:latest
+    command: ["train", "--data-dir", "/app/data", "--epochs", "5"]
+    volumes:
+      - ./data:/app/data:ro
+      - model_data:/app/model
+      - mlruns_data:/app/mlruns
+    environment:
+      - MLFLOW_TRACKING_URI=/app/mlruns
+    profiles:
+      - train
+
+  # ── FastAPI prediction server ─────────────────────────────────────────────
+  api:
+    build: .
+    image: pos-classifier:latest
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - model_data:/app/model
+    environment:
+      - MLFLOW_TRACKING_URI=/app/mlruns
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - serve
+
+  # ── Streamlit monitoring dashboard ────────────────────────────────────────
+  dashboard:
+    build: .
+    image: pos-classifier:latest
+    command: ["monitor", "--port", "8501"]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+      - model_data:/app/model
+    depends_on:
+      - api
+    profiles:
+      - serve

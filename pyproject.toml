@@ -1,0 +1,68 @@
+[project]
+name = "pos-classifier"
+version = "0.1.0"
+description = "POS product description classifier — fine-tuned BERT-tiny with FastAPI serving and MLflow tracking"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # ML core
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.29.0",
+    "scikit-learn>=1.4.0",
+    # Experiment tracking
+    "mlflow>=2.12.0",
+    # Pin protobuf to <5 — opentelemetry-proto 1.x generates pb2 files
+    # incompatible with protobuf 5+/7+ (upstream bug in otel-proto grpc stubs)
+    "protobuf>=3.20.0,<4.0.0",
+    # Serving
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+    # Monitoring
+    "prometheus-client>=0.20.0",
+    "streamlit>=1.34.0",
+    "plotly>=5.22.0",
+    # Data
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    # Utilities
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+]
+
+[project.scripts]
+pos-classifier = "pos_classifier.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pos_classifier"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+# ── GPU / CUDA PyTorch ────────────────────────────────────────────────────────
+# RTX 3050 (CUDA 12.7 driver) — cu124 gives torch>=2.6, removing the need for
+# the model_revision workaround (CVE-2025-32434 .bin restriction).
+# To revert to CPU-only: comment out the two sections below and run `uv sync`.
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
