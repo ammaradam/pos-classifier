@@ -119,10 +119,13 @@ def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
         result = results[0]
         elapsed = time.perf_counter() - t0
 
-        REQUEST_COUNT.labels(endpoint="predict", category=result.category).inc()
-        REQUEST_LATENCY.labels(endpoint="predict").observe(elapsed)
-        if result.flagged_for_human_review:
-            FLAGGED_COUNT.inc()
+        try:
+            REQUEST_COUNT.labels(endpoint="predict", category=result.category).inc()
+            REQUEST_LATENCY.labels(endpoint="predict").observe(elapsed)
+            if result.flagged_for_human_review:
+                FLAGGED_COUNT.inc()
+        except Exception as exc:
+            logger.error("Metrics recording failed: %s", exc)
 
         logger.info(
             "predict  desc=%r  cat=%s  conf=%.4f  flagged=%s  latency_ms=%.1f",
@@ -147,11 +150,14 @@ def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="Batch prediction failed.")
         elapsed = time.perf_counter() - t0
 
-        for r in results:
-            REQUEST_COUNT.labels(endpoint="predict_batch", category=r.category).inc()
-            if r.flagged_for_human_review:
-                FLAGGED_COUNT.inc()
-        REQUEST_LATENCY.labels(endpoint="predict_batch").observe(elapsed)
+        try:
+            for r in results:
+                REQUEST_COUNT.labels(endpoint="predict_batch", category=r.category).inc()
+                if r.flagged_for_human_review:
+                    FLAGGED_COUNT.inc()
+            REQUEST_LATENCY.labels(endpoint="predict_batch").observe(elapsed)
+        except Exception as exc:
+            logger.error("Metrics recording failed: %s", exc)
 
         logger.info(
             "predict_batch  n=%d  latency_ms=%.1f",

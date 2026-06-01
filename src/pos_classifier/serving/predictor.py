@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -145,33 +146,61 @@ class Predictor:
         return results
 
     def _persist(self, rows: list[tuple]) -> None:
-        try:
-            conn = sqlite3.connect(self.db_path)
-            conn.executemany(
-                """INSERT INTO predictions
-                   (product_description, predicted_category, confidence,
-                    flagged_for_review, model_version, predicted_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            logger.exception("Failed to persist predictions to DB.")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executemany(
+                    """INSERT INTO predictions
+                       (product_description, predicted_category, confidence,
+                        flagged_for_review, model_version, predicted_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                conn.commit()
+                conn.close()
+                return
+            except sqlite3.OperationalError as e:
+                conn.close() if 'conn' in locals() else None
+                if attempt < max_retries - 1:
+                    wait = 0.1 * (2 ** attempt)
+                    logger.warning("DB write retry %d/%d after %.2fs (locked: %s)", attempt + 1, max_retries, wait, str(e))
+                    time.sleep(wait)
+                else:
+                    logger.error("DB write failed after %d retries: %s", max_retries, e)
+                    raise
+            except Exception as e:
+                logger.error("Unexpected DB error: %s", e)
+                raise
 
     def record_feedback(self, description: str, corrected: str, original: Optional[str]) -> None:
         if corrected not in LABEL_MAP:
             raise ValueError(f"Invalid category '{corrected}'. Valid: {list(LABEL_MAP.keys())}")
         now = datetime.now(timezone.utc).isoformat()
-        try:
-            conn = sqlite3.connect(self.db_path)
-            conn.execute(
-                """INSERT INTO feedback
-                   (product_description, corrected_category, original_prediction, submitted_at)
-                   VALUES (?, ?, ?, ?)""",
-                (description, corrected, original, now),
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            logger.exception("Failed to record feedback.")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(
+                    """INSERT INTO feedback
+                       (product_description, corrected_category, original_prediction, submitted_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (description, corrected, original, now),
+                )
+                conn.commit()
+                conn.close()
+                return
+            except sqlite3.OperationalError as e:
+                conn.close() if 'conn' in locals() else None
+                if attempt < max_retries - 1:
+                    wait = 0.1 * (2 ** attempt)
+                    logger.warning("Feedback DB write retry %d/%d after %.2fs (locked: %s)", attempt + 1, max_retries, wait, str(e))
+                    time.sleep(wait)
+                else:
+                    logger.error("Feedback DB write failed after %d retries: %s", max_retries, e)
+                    raise
+            except Exception as e:
+                logger.error("Unexpected feedback DB error: %s", e)
+                raise

@@ -4,13 +4,17 @@ version: "3.9"
 volumes:
   model_data:
   mlruns_data:
+  prometheus_data:
+  grafana_data:
 
 services:
 
   # ── Training job (run once, exits when done) ──────────────────────────────
   trainer:
-    build: .
-    image: pos-classifier:latest
+    build:
+      context: .
+      target: train
+    image: pos-classifier:train
     command: ["train", "--data-dir", "/app/data", "--epochs", "5"]
     volumes:
       - ./data:/app/data:ro
@@ -18,13 +22,24 @@ services:
       - mlruns_data:/app/mlruns
     environment:
       - MLFLOW_TRACKING_URI=/app/mlruns
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     profiles:
       - train
 
   # ── FastAPI prediction server ─────────────────────────────────────────────
   api:
-    build: .
-    image: pos-classifier:latest
+    build:
+      context: .
+      target: serve
+    image: pos-classifier:serve
     command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
@@ -42,8 +57,10 @@ services:
 
   # ── Streamlit monitoring dashboard ────────────────────────────────────────
   dashboard:
-    build: .
-    image: pos-classifier:latest
+    build:
+      context: .
+      target: serve
+    image: pos-classifier:serve
     command: ["monitor", "--port", "8501"]
     ports:
       - "8501:8501"
@@ -52,5 +69,38 @@ services:
       - model_data:/app/model
     depends_on:
       - api
+    profiles:
+      - serve
+
+  # ── Prometheus metrics collector ──────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      - api
+    profiles:
+      - serve
+
+  # ── Grafana dashboard ────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_INSTALL_PLUGINS=
+    depends_on:
+      - prometheus
     profiles:
       - serve
