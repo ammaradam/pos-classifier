@@ -82,7 +82,7 @@ The training data is imbalanced:
 
 Without class weights, the cross-entropy gradient is dominated by Dry Goods examples. The model converges to a solution that maximises accuracy on the majority classes while under-learning Specialty & Miscellaneous. Balanced weights scale each class's gradient contribution inversely to its frequency, so the minority class receives proportionally more learning signal per epoch.
 
-**Trade-off accepted:** Class weighting slightly reduces accuracy on majority classes to gain recall on the minority class. This is the correct trade-off for a business application where misclassifying a "Specialty & Miscellaneous" item as "Dry Goods" has real downstream cost (incorrect planogram, wrong pricing tier, etc.).
+**Trade-off accepted:** Class weighting slightly reduces accuracy on majority classes to gain recall on the minority class. This is the correct trade-off for a business application where misclassifying a "Specialty & Miscellaneous" item as "Dry Goods" has real downstream cost (incorrect shelf placement, wrong pricing tier, etc.).
 
 ---
 
@@ -240,3 +240,48 @@ Even the longest description in the dataset produces fewer than 40 tokens (inclu
 **Effect:** Reducing from 128 to 64 roughly halves the attention computation per forward pass (attention scales as O(n²): (64/128)² = 0.25× the attention matrix operations). On CPU this translates directly to faster training and lower serving latency; on GPU it increases effective batch size under the same memory budget.
 
 **Trade-off accepted:** If the dataset is refreshed with noticeably longer descriptions (e.g., marketing copy rather than product names), this value should be revisited. The correct procedure is to re-run the token-length distribution analysis on the new data and increase `max_length` in `TrainingConfig` if p99 exceeds ~50 tokens.
+
+---
+
+## 14. MLflow Model Registry Integration: Middle-Ground Strategy
+
+**Decision:** Use a dual-mode serving strategy: `docker run` uses the model baked into the image at build time; `docker compose --profile serve` uses the MLflow Model Registry (served by a `mlflow-server` Compose service) and fetches the `Production`-stage model at container startup.
+
+**Rationale:**
+
+Three options were considered:
+
+| Option | Model source | Infra dependency at serve time | Rollout mechanism |
+|--------|-------------|-------------------------------|-------------------|
+| Baked-only | Image layer | None | Rebuild image |
+| Registry-only | MLflow server | MLflow server must be healthy | Push to `Production` stage |
+| **Middle-ground (chosen)** | **Registry in Compose; image in docker run** | **Compose only** | **Both paths available** |
+
+The baked-only approach is correct for production deploys (self-contained, no network dependency, deterministic cold start) but makes iterating during local development expensive — every model update requires a full image rebuild and redeploy. The registry-only approach adds a hard runtime dependency: if the MLflow server is unavailable the serving container cannot start, creating an infrastructure coupling that is unacceptable in production.
+
+The middle ground gives each context what it actually needs:
+
+- **`docker run pos-classifier:latest serve`** — ships as a self-contained artefact. The model is in the image layer, startup is deterministic, no MLflow server required. Suitable for production environments, CI smoke tests, and one-shot inference.
+- **`docker compose --profile serve up`** — starts an `mlflow-server` container alongside the api. The api reads `MLFLOW_MODEL_NAME=pos-classifier` and `MLFLOW_MODEL_STAGE=Production` from the Compose environment and calls `mlflow.artifacts.download_artifacts("models:/pos-classifier/Production")` at startup. This means a newly trained model can be promoted to `Production` and picked up by a container restart — no image rebuild required.
+
+**Workflow (Compose):**
+```
+docker compose --profile train up
+  → trainer registers best model to mlflow-server
+  → trainer auto-promotes to Production
+
+docker compose --profile serve up
+  → api fetches Production model from mlflow-server on startup
+  → predictions are served immediately
+```
+
+**Workflow (docker run / production):**
+```
+uv run python -m pos_classifier train   # train locally
+docker build .                          # bakes model/best_model into image
+docker run pos-classifier:latest serve  # no registry, no network dependency
+```
+
+**Auto-promotion:** After a successful training run the trainer calls `transition_model_stage("pos-classifier", version, "Production")` immediately. This is intentional for a development/demo stack where every trained model supersedes the previous one. In a production pipeline this step would be gated on a quality threshold (e.g., test macro-F1 > current Production model's macro-F1) before promotion.
+
+**Trade-off accepted:** In Compose, the api has a startup dependency on the MLflow server. If `mlflow-server` is unhealthy the api cannot load the model. This is acceptable in a local/dev context where the full Compose stack is managed together and the operator controls all services. It would not be acceptable in a production deployment, where the baked-image path is used instead.

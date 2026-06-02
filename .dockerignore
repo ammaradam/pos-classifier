@@ -16,7 +16,9 @@ venv/
 htmlcov/
 
 data/
+db/
 model/
+!model/best_model/
 mlruns/
 notebooks/
 .ipynb_checkpoints/

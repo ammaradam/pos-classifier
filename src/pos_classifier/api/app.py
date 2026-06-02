@@ -63,9 +63,14 @@ def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         # ── Startup: load model ───────────────────────────────────────────────
         model_dir = cfg.model_output_path()
-        db_path = model_dir.parent / "predictions.db"
+        db_path = Path(cfg.db_dir) / "predictions.db"
         try:
-            Predictor.get(model_dir=model_dir, db_path=db_path)
+            Predictor.get(
+                model_dir=model_dir,
+                db_path=db_path,
+                mlflow_model_name=cfg.mlflow_model_name,
+                mlflow_model_stage=cfg.mlflow_model_stage,
+            )
             logger.info("Predictor initialised on startup.")
         except Exception as exc:
             logger.warning("Model not found on startup (%s) — load it via retraining.", exc)
@@ -199,12 +204,24 @@ def create_app(cfg: TrainingConfig | None = None) -> FastAPI:
 
 def _get_predictor(cfg: TrainingConfig) -> Predictor:
     model_dir = cfg.model_output_path()
-    db_path = model_dir.parent / "predictions.db"
+    db_path = Path(cfg.db_dir) / "predictions.db"
     if Predictor._instance is None:
-        if not model_dir.exists():
+        if not cfg.mlflow_model_name and not model_dir.exists():
             raise HTTPException(
                 status_code=503,
                 detail="Model not trained yet. Run training first.",
             )
-        Predictor.get(model_dir=model_dir, db_path=db_path)
+        try:
+            Predictor.get(
+                model_dir=model_dir,
+                db_path=db_path,
+                mlflow_model_name=cfg.mlflow_model_name,
+                mlflow_model_stage=cfg.mlflow_model_stage,
+            )
+        except Exception as exc:
+            logger.exception("Model failed to load")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Model failed to load: {exc}",
+            )
     return Predictor._instance  # type: ignore[return-value]

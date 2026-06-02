@@ -3,27 +3,59 @@ version: "3.9"
 # Shared volume for model artifacts, SQLite DB, and MLflow runs
 volumes:
   model_data:
+  db_data:
   mlruns_data:
   prometheus_data:
   grafana_data:
 
 services:
 
+  # ── MLflow tracking server ────────────────────────────────────────────────
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "/app/mlruns", "--default-artifact-root", "/app/mlruns", "--allowed-hosts", "mlflow-server,localhost,127.0.0.1"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlruns_data:/app/mlruns
+    profiles:
+      - train
+      - serve
+
   # ── Training job (run once, exits when done) ──────────────────────────────
   trainer:
-    build:
-      context: .
-      target: train
-    image: pos-classifier:train
-    command: ["train", "--data-dir", "/app/data", "--epochs", "5"]
+    build: .
+    image: pos-classifier:latest
+    command: ["train"]
     volumes:
       - ./data:/app/data:ro
       - model_data:/app/model
-      - mlruns_data:/app/mlruns
     environment:
-      - MLFLOW_TRACKING_URI=/app/mlruns
+      # ── Infrastructure ──────────────────────────────────────────────────────
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # ── Data ────────────────────────────────────────────────────────────────
+      - TRAIN_DATA_DIR=/app/data
+      # ── Model ───────────────────────────────────────────────────────────────
+      - TRAIN_MODEL_NAME=prajjwal1/bert-tiny
+      - TRAIN_MAX_LENGTH=64
+      # ── Optimisation (edit these to tune) ───────────────────────────────────
+      - TRAIN_EPOCHS=5
+      - TRAIN_BATCH_SIZE=64
+      - TRAIN_EVAL_BATCH_SIZE=128
+      - TRAIN_LR=2e-5
+      - TRAIN_WEIGHT_DECAY=0.01
+      - TRAIN_WARMUP_RATIO=0.1
+      - TRAIN_PATIENCE=2
+      - TRAIN_GRAD_ACCUM=1
+      # ── GPU ─────────────────────────────────────────────────────────────────
+      - TRAIN_USE_AMP=true
+      - TRAIN_NUM_WORKERS=0
+      # ── Smoke test (set to e.g. 500 for a quick run) ─────────────────────────
+      - TRAIN_SUBSET=0
+    depends_on:
+      - mlflow-server
     deploy:
       resources:
         reservations:
@@ -36,17 +68,16 @@ services:
 
   # ── FastAPI prediction server ─────────────────────────────────────────────
   api:
-    build:
-      context: .
-      target: serve
-    image: pos-classifier:serve
+    build: .
+    image: pos-classifier:latest
     command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     volumes:
-      - model_data:/app/model
-    environment:
-      - MLFLOW_TRACKING_URI=/app/mlruns
+      - db_data:/app/db
+    # MLFLOW_MODEL_NAME is intentionally unset: the model is baked into the
+    # image at model/best_model. Set MLFLOW_MODEL_NAME=pos-classifier (and
+    # add depends_on mlflow-server) only when serving from the model registry.
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 15s
@@ -57,16 +88,14 @@ services:
 
   # ── Streamlit monitoring dashboard ────────────────────────────────────────
   dashboard:
-    build:
-      context: .
-      target: serve
-    image: pos-classifier:serve
+    build: .
+    image: pos-classifier:latest
     command: ["monitor", "--port", "8501"]
     ports:
       - "8501:8501"
     volumes:
       - ./data:/app/data:ro
-      - model_data:/app/model
+      - db_data:/app/db
     depends_on:
       - api
     profiles:

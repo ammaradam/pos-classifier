@@ -24,14 +24,23 @@ def _cmd_train(args: argparse.Namespace) -> None:
     from pos_classifier.config import TrainingConfig
     from pos_classifier.training.trainer import train
 
-    cfg = TrainingConfig(
-        data_dir=args.data_dir,
-        num_epochs=args.epochs,
-        data_subset=args.subset,
-        model_name=args.model_name,
-        batch_size=args.batch_size,
-        learning_rate=args.lr,
-    )
+    # Start from env-var defaults; only apply CLI flags that were explicitly set
+    # (None sentinel) so that env vars are not silently overridden by argparse defaults.
+    overrides: dict = {}
+    if args.data_dir is not None:
+        overrides["data_dir"] = args.data_dir
+    if args.epochs is not None:
+        overrides["num_epochs"] = args.epochs
+    if args.subset is not None:
+        overrides["data_subset"] = args.subset
+    if args.model_name is not None:
+        overrides["model_name"] = args.model_name
+    if args.batch_size is not None:
+        overrides["batch_size"] = args.batch_size
+    if args.lr is not None:
+        overrides["learning_rate"] = args.lr
+
+    cfg = TrainingConfig(**overrides)
     logger.info("Starting training with config: %s", cfg)
     metrics = train(cfg)
     logger.info(
@@ -44,8 +53,14 @@ def _cmd_train(args: argparse.Namespace) -> None:
 def _cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
     from pos_classifier.api.app import create_app
+    from pos_classifier.config import TrainingConfig
 
-    app = create_app()
+    cfg = TrainingConfig()
+    if args.from_registry:
+        cfg.mlflow_model_name = args.registry_model
+        cfg.mlflow_model_stage = args.registry_stage
+
+    app = create_app(cfg)
     logger.info("Starting API server on http://%s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
@@ -82,7 +97,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> None:
 
     cfg = TrainingConfig(data_dir=args.data_dir)
     model_dir = cfg.model_output_path()
-    db_path = model_dir.parent / "predictions.db"
+    db_path = Path(cfg.db_dir) / "predictions.db"
     query_csv = Path(cfg.data_dir) / "Query_and_Validation_data.csv"
 
     predictor = Predictor.get(model_dir=model_dir, db_path=db_path)
@@ -169,17 +184,20 @@ def main() -> None:
 
     # ── train ──────────────────────────────────────────────────────────────────
     p_train = sub.add_parser("train", help="Fine-tune the model on training data.")
-    p_train.add_argument("--data-dir", default="data", help="Path to directory containing CSVs.")
-    p_train.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
-    p_train.add_argument("--subset", type=int, default=0, help="Use only first N rows (0 = all).")
-    p_train.add_argument("--model-name", default="prajjwal1/bert-tiny")
-    p_train.add_argument("--batch-size", type=int, default=64)
-    p_train.add_argument("--lr", type=float, default=2e-5, help="Learning rate.")
+    p_train.add_argument("--data-dir", default=None, help="Override TRAIN_DATA_DIR env var.")
+    p_train.add_argument("--epochs", type=int, default=None, help="Override TRAIN_EPOCHS env var.")
+    p_train.add_argument("--subset", type=int, default=None, help="Override TRAIN_SUBSET env var (0 = all).")
+    p_train.add_argument("--model-name", default=None, help="Override TRAIN_MODEL_NAME env var.")
+    p_train.add_argument("--batch-size", type=int, default=None, help="Override TRAIN_BATCH_SIZE env var.")
+    p_train.add_argument("--lr", type=float, default=None, help="Override TRAIN_LR env var.")
 
     # ── serve ──────────────────────────────────────────────────────────────────
     p_serve = sub.add_parser("serve", help="Start the FastAPI prediction server.")
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument("--from-registry", action="store_true", help="Load model from MLflow registry instead of local path.")
+    p_serve.add_argument("--registry-model", default="pos-classifier", help="Registered model name (default: pos-classifier).")
+    p_serve.add_argument("--registry-stage", default="Production", choices=["Staging", "Production"], help="Registry stage to load (default: Production).")
 
     # ── monitor ────────────────────────────────────────────────────────────────
     p_monitor = sub.add_parser("monitor", help="Launch the Streamlit monitoring dashboard.")

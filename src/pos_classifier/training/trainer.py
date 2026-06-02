@@ -334,16 +334,18 @@ def train(cfg: TrainingConfig) -> dict:
             # ── Register model to MLflow Model Registry ────────────────────────
             run_id = mlflow.active_run().info.run_id
             try:
-                from pos_classifier.model_registry import register_model
+                from pos_classifier.model_registry import register_model, transition_model_stage
                 version = register_model(
                     out_dir,
                     run_id,
                     model_name="pos-classifier",
                     description=f"Test accuracy={test_metrics['accuracy']:.4f}, macro_f1={test_metrics['macro_f1']:.4f}",
                 )
-                mlflow.set_tag("model_version", version.version)
+                mlflow.set_tag("registry_version", version.version)
+                transition_model_stage("pos-classifier", version.version, "Production")
+                logger.info("Model v%s promoted to Production.", version.version)
             except Exception:
-                logger.exception("Failed to register model to registry (non-fatal).")
+                logger.exception("Failed to register/promote model to registry (non-fatal).")
 
         except Exception:
             logger.exception(

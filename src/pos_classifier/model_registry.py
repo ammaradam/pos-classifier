@@ -40,7 +40,7 @@ def register_model(
         raise ValueError(f"Run {run_id} not found in MLflow tracking server")
 
     # Register model from artifact
-    model_uri = f"runs://{run_id}/model_artifact"
+    model_uri = f"runs:/{run_id}/model_artifact"
     try:
         version = mlflow.register_model(model_uri, model_name)
         logger.info(

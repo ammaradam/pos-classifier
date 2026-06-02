@@ -29,7 +29,7 @@ st.title("📊 POS Product Classifier — Monitoring Dashboard")
 
 cfg = TrainingConfig()
 model_dir = cfg.model_output_path()
-db_path = model_dir.parent / "predictions.db"
+db_path = Path(cfg.db_dir) / "predictions.db"
 query_csv = Path(cfg.data_dir) / "Query_and_Validation_data.csv"
 
 # ── Sidebar: controls ─────────────────────────────────────────────────────────

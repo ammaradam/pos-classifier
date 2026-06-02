@@ -19,7 +19,7 @@ from pos_classifier.serving.schema import PredictResponse
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_DIR = Path("model/best_model")
-_DEFAULT_DB_PATH = Path("model/predictions.db")
+_DEFAULT_DB_PATH = Path("db/predictions.db")
 
 
 class Predictor:
@@ -31,15 +31,39 @@ class Predictor:
 
     _instance: Optional["Predictor"] = None
 
-    def __init__(self, model_dir: Path = _DEFAULT_MODEL_DIR, db_path: Path = _DEFAULT_DB_PATH) -> None:
+    def __init__(
+        self,
+        model_dir: Path = _DEFAULT_MODEL_DIR,
+        db_path: Path = _DEFAULT_DB_PATH,
+        mlflow_model_name: str = "",
+        mlflow_model_stage: str = "Production",
+    ) -> None:
         self.model_dir = model_dir
         self.db_path = db_path
+        self.mlflow_model_name = mlflow_model_name
+        self.mlflow_model_stage = mlflow_model_stage
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._load_model()
         self._init_db()
 
     def _load_model(self) -> None:
+        if self.mlflow_model_name:
+            self._load_from_registry()
+        else:
+            self._load_from_local()
+
+    def _load_from_registry(self) -> None:
+        import mlflow
+        model_uri = f"models:/{self.mlflow_model_name}/{self.mlflow_model_stage}"
+        logger.info("Loading model from MLflow registry: %s", model_uri)
+        local_path = mlflow.artifacts.download_artifacts(model_uri)
+        self.model_dir = Path(local_path)
+        self._load_from_local()
+
+    def _load_from_local(self) -> None:
         logger.info("Loading model from %s …", self.model_dir)
+        if not self.model_dir.is_dir():
+            raise FileNotFoundError(f"Model directory not found: {self.model_dir.resolve()}")
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_dir))
         self.model = AutoModelForSequenceClassification.from_pretrained(
             str(self.model_dir)
@@ -90,9 +114,20 @@ class Predictor:
         conn.close()
 
     @classmethod
-    def get(cls, model_dir: Path = _DEFAULT_MODEL_DIR, db_path: Path = _DEFAULT_DB_PATH) -> "Predictor":
+    def get(
+        cls,
+        model_dir: Path = _DEFAULT_MODEL_DIR,
+        db_path: Path = _DEFAULT_DB_PATH,
+        mlflow_model_name: str = "",
+        mlflow_model_stage: str = "Production",
+    ) -> "Predictor":
         if cls._instance is None:
-            cls._instance = cls(model_dir=model_dir, db_path=db_path)
+            cls._instance = cls(
+                model_dir=model_dir,
+                db_path=db_path,
+                mlflow_model_name=mlflow_model_name,
+                mlflow_model_stage=mlflow_model_stage,
+            )
         return cls._instance
 
     @classmethod
@@ -110,7 +145,7 @@ class Predictor:
             texts,
             truncation=True,
             padding="max_length",
-            max_length=128,
+            max_length=64,
             return_tensors="pt",
         )
         input_ids = encodings["input_ids"].to(self.device)
