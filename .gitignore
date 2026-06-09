@@ -43,3 +43,4 @@ logs/
 
 # Misc
 .streamlit/
+.archive/
