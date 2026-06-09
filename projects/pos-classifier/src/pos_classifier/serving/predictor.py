@@ -4,7 +4,6 @@ import json
 import logging
 import random
 import sqlite3
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from ml_shared.db import write_with_retry
 from pos_classifier.config import ID_TO_LABEL, LABEL_MAP, NUM_LABELS
 from pos_classifier.serving.schema import PredictResponse
 
@@ -162,7 +162,6 @@ class Predictor:
 
         for text, conf, pred_id in zip(texts, confs.cpu().tolist(), pred_ids.cpu().tolist()):
             category = ID_TO_LABEL[pred_id]
-            # Flag if below confidence threshold OR randomly sampled for human review
             flagged = conf < self.confidence_threshold or random.random() < self.review_sample_rate
             resp = PredictResponse(
                 product_description=text,
@@ -177,65 +176,25 @@ class Predictor:
                 (text, category, round(conf, 4), int(flagged), self.model_version, now.isoformat())
             )
 
-        self._persist(rows_to_insert)
+        write_with_retry(
+            self.db_path,
+            """INSERT INTO predictions
+               (product_description, predicted_category, confidence,
+                flagged_for_review, model_version, predicted_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows_to_insert,
+            many=True,
+        )
         return results
-
-    def _persist(self, rows: list[tuple]) -> None:
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                conn = sqlite3.connect(self.db_path, timeout=5.0)
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.executemany(
-                    """INSERT INTO predictions
-                       (product_description, predicted_category, confidence,
-                        flagged_for_review, model_version, predicted_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    rows,
-                )
-                conn.commit()
-                conn.close()
-                return
-            except sqlite3.OperationalError as e:
-                conn.close() if 'conn' in locals() else None
-                if attempt < max_retries - 1:
-                    wait = 0.1 * (2 ** attempt)
-                    logger.warning("DB write retry %d/%d after %.2fs (locked: %s)", attempt + 1, max_retries, wait, str(e))
-                    time.sleep(wait)
-                else:
-                    logger.error("DB write failed after %d retries: %s", max_retries, e)
-                    raise
-            except Exception as e:
-                logger.error("Unexpected DB error: %s", e)
-                raise
 
     def record_feedback(self, description: str, corrected: str, original: Optional[str]) -> None:
         if corrected not in LABEL_MAP:
             raise ValueError(f"Invalid category '{corrected}'. Valid: {list(LABEL_MAP.keys())}")
         now = datetime.now(timezone.utc).isoformat()
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                conn = sqlite3.connect(self.db_path, timeout=5.0)
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute(
-                    """INSERT INTO feedback
-                       (product_description, corrected_category, original_prediction, submitted_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (description, corrected, original, now),
-                )
-                conn.commit()
-                conn.close()
-                return
-            except sqlite3.OperationalError as e:
-                conn.close() if 'conn' in locals() else None
-                if attempt < max_retries - 1:
-                    wait = 0.1 * (2 ** attempt)
-                    logger.warning("Feedback DB write retry %d/%d after %.2fs (locked: %s)", attempt + 1, max_retries, wait, str(e))
-                    time.sleep(wait)
-                else:
-                    logger.error("Feedback DB write failed after %d retries: %s", max_retries, e)
-                    raise
-            except Exception as e:
-                logger.error("Unexpected feedback DB error: %s", e)
-                raise
+        write_with_retry(
+            self.db_path,
+            """INSERT INTO feedback
+               (product_description, corrected_category, original_prediction, submitted_at)
+               VALUES (?, ?, ?, ?)""",
+            (description, corrected, original, now),
+        )

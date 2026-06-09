@@ -132,7 +132,7 @@ The 20% random sample rate matches the exercise specification. In practice, this
 
 ## 8. SQLite for KPI and Feedback Storage
 
-**Decision:** Persist all predictions and human feedback to a local SQLite database (`model/predictions.db`).
+**Decision:** Persist all predictions and human feedback to a local SQLite database (`db/predictions.db`).
 
 **Rationale:**
 
@@ -144,7 +144,7 @@ For an exercise environment (single container, no shared infrastructure), SQLite
 
 The schema is deliberately simple — two tables (`predictions`, `feedback`) with fixed columns — so that migrating to Postgres for production requires only replacing the `sqlite3` connection string with a `psycopg2` or SQLAlchemy connection. No application logic changes.
 
-**Production upgrade path:** Replace `sqlite3.connect(db_path)` in `predictor.py` and `metrics.py` with a `sqlalchemy.Engine` backed by Cloud SQL or RDS. The rest of the code is unchanged.
+**Production upgrade path:** Replace `ml_shared.db.write_with_retry` calls in `predictor.py` and the raw `sqlite3` calls in `monitoring/metrics.py` with a `sqlalchemy.Engine` backed by Cloud SQL or RDS. The rest of the code is unchanged.
 
 ---
 
@@ -205,17 +205,23 @@ This is intentionally an additive loop: the original training data is always inc
 
 ---
 
-## 12. Multi-Stage Docker Build
+## 12. Docker Build Strategy
 
-**Decision:** Use a two-stage Dockerfile: a `builder` stage that installs dependencies with `uv`, and a lean `runtime` stage that copies only the venv and source code. Pre-download BERT-tiny weights as a build-time layer.
+**Decision:** Use a single-stage Dockerfile based on `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`. The build context is the **repo root** (not the project directory) so the Dockerfile can access `libs/ml-shared/`. Dependency installation is layered before source code to maximise cache reuse.
 
 **Rationale:**
 
-- **Smaller runtime image:** Build tools (`uv`, `pip`, compilers for native extensions) are not needed at runtime. A single-stage build would include them unnecessarily.
-- **Layer caching:** Separating dependency installation (`COPY pyproject.toml` → `uv sync`) from source code copying (`COPY src/`) means that rebuilding after a code change does not re-download or re-compile dependencies.
-- **Model weights as a layer:** Downloading `prajjwal1/bert-tiny` at build time (∼17MB) bakes the weights into the image. This avoids a network call to HuggingFace Hub on every container start, making cold starts deterministic and eliminating a production dependency on external internet access.
+- **PyTorch base image:** torch/torchvision are pre-installed in the base image, which sidesteps the uv workspace CPU/GPU dual-index conflict. Baking torch into the workspace lock would require a workspace-wide "all projects use the same torch variant" constraint that is impractical when different projects might target different hardware profiles.
+- **Repo-root build context:** Each project's `Dockerfile` is at `projects/<name>/Dockerfile`, but the build context is always `.` (repo root). This lets `COPY libs/ml-shared/` work without escaping the Docker build context.
+- **Layer caching:** The order is: copy workspace coordinator → copy shared lib → copy project manifest → install deps → copy source. A source-only change skips the multi-minute dependency install layer.
+- **Model weights as a layer:** `model/best_model/` is copied at build time (∼17MB). This avoids a network call to HuggingFace Hub on every container start, making cold starts deterministic.
 
-**Trade-off accepted:** The image is larger (∼17MB of model weights included), but this is the correct trade-off for a serving image where startup reliability matters more than image size.
+```bash
+# Correct build invocation (from repo root):
+docker build -f projects/pos-classifier/Dockerfile -t pos-classifier:latest .
+```
+
+**Trade-off accepted:** The image includes model weights (∼17MB) and the full `pytorch/pytorch` runtime (∼5GB for GPU). This is correct for a serving image where startup reliability and reproducibility matter more than image size.
 
 ---
 
@@ -245,7 +251,7 @@ Even the longest description in the dataset produces fewer than 40 tokens (inclu
 
 ## 14. MLflow Model Registry Integration: Middle-Ground Strategy
 
-**Decision:** Use a dual-mode serving strategy: `docker run` uses the model baked into the image at build time; `docker compose --profile serve` uses the MLflow Model Registry (served by a `mlflow-server` Compose service) and fetches the `Production`-stage model at container startup.
+**Decision:** Use a dual-mode serving strategy: `docker run` uses the model baked into the image at build time; `docker compose --profile serve-pos` uses the MLflow Model Registry (served by a `mlflow-server` Compose service) and fetches the `Production`-stage model at container startup.
 
 **Rationale:**
 
@@ -262,26 +268,29 @@ The baked-only approach is correct for production deploys (self-contained, no ne
 The middle ground gives each context what it actually needs:
 
 - **`docker run pos-classifier:latest serve`** — ships as a self-contained artefact. The model is in the image layer, startup is deterministic, no MLflow server required. Suitable for production environments, CI smoke tests, and one-shot inference.
-- **`docker compose --profile serve up`** — starts an `mlflow-server` container alongside the api. The api reads `MLFLOW_MODEL_NAME=pos-classifier` and `MLFLOW_MODEL_STAGE=Production` from the Compose environment and calls `mlflow.artifacts.download_artifacts("models:/pos-classifier/Production")` at startup. This means a newly trained model can be promoted to `Production` and picked up by a container restart — no image rebuild required.
+- **`docker compose --profile serve-pos up`** — starts an `mlflow-server` container alongside the api. The api reads `MLFLOW_MODEL_NAME=pos-classifier` and `MLFLOW_MODEL_STAGE=Production` from the Compose environment and calls `mlflow.artifacts.download_artifacts("models:/pos-classifier/Production")` at startup. This means a newly trained model can be promoted to `Production` and picked up by a container restart — no image rebuild required.
 
 **Workflow (Compose):**
 ```
-docker compose --profile train up
+docker compose --profile train-pos up
   → trainer registers best model to mlflow-server
   → trainer auto-promotes to Production
 
-docker compose --profile serve up
+docker compose --profile serve-pos up
   → api fetches Production model from mlflow-server on startup
   → predictions are served immediately
 ```
 
 **Workflow (docker run / production):**
 ```
+cd projects/pos-classifier
 uv run python -m pos_classifier train   # train locally
-docker build .                          # bakes model/best_model into image
+
+# Build from repo root — context must include libs/ml-shared
+docker build -f projects/pos-classifier/Dockerfile -t pos-classifier:latest .
 docker run pos-classifier:latest serve  # no registry, no network dependency
 ```
 
-**Auto-promotion:** After a successful training run the trainer calls `transition_model_stage("pos-classifier", version, "Production")` immediately. This is intentional for a development/demo stack where every trained model supersedes the previous one. In a production pipeline this step would be gated on a quality threshold (e.g., test macro-F1 > current Production model's macro-F1) before promotion.
+**Auto-promotion:** After a successful training run the trainer calls `ml_shared.mlflow_utils.transition_model_stage("pos-classifier", version, "Production")` (via `pos_classifier.model_registry`) immediately. This is intentional for a development/demo stack where every trained model supersedes the previous one. In a production pipeline this step would be gated on a quality threshold (e.g., test macro-F1 > current Production model's macro-F1) before promotion.
 
 **Trade-off accepted:** In Compose, the api has a startup dependency on the MLflow server. If `mlflow-server` is unhealthy the api cannot load the model. This is acceptable in a local/dev context where the full Compose stack is managed together and the operator controls all services. It would not be acceptable in a production deployment, where the baked-image path is used instead.

@@ -1,46 +1,53 @@
 version: "3.9"
 
-# Shared volume for model artifacts, SQLite DB, and MLflow runs
 volumes:
-  model_data:
-  db_data:
+  # Shared infra
   mlruns_data:
   prometheus_data:
   grafana_data:
+  # pos-classifier
+  pos_model_data:
+  pos_db_data:
+  # brand-detector
+  bd_model_data:
+  bd_db_data:
 
 services:
 
-  # ── MLflow tracking server ────────────────────────────────────────────────
+  # ── Shared MLflow tracking server ─────────────────────────────────────────
   mlflow-server:
     image: ghcr.io/mlflow/mlflow:latest
-    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "/app/mlruns", "--default-artifact-root", "/app/mlruns", "--allowed-hosts", "mlflow-server,localhost,127.0.0.1"]
+    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000",
+              "--backend-store-uri", "/app/mlruns",
+              "--default-artifact-root", "/app/mlruns",
+              "--allowed-hosts", "mlflow-server,localhost,127.0.0.1"]
     ports:
       - "5000:5000"
     volumes:
       - mlruns_data:/app/mlruns
-    profiles:
-      - train
-      - serve
+    profiles: [train-pos, serve-pos, train-bd, serve-bd]
 
-  # ── Training job (run once, exits when done) ──────────────────────────────
-  trainer:
-    build: .
+  # ══════════════════════════════════════════════════════════════════════════
+  # pos-classifier services
+  # Build context is the repo root so the Dockerfile can access libs/ml-shared.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  pos-trainer:
+    build:
+      context: .
+      dockerfile: projects/pos-classifier/Dockerfile
     image: pos-classifier:latest
     command: ["train"]
     volumes:
-      - ./data:/app/data:ro
-      - model_data:/app/model
+      - ./projects/pos-classifier/data:/app/data:ro
+      - pos_model_data:/app/model
     environment:
-      # ── Infrastructure ──────────────────────────────────────────────────────
       - MLFLOW_TRACKING_URI=http://mlflow-server:5000
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # ── Data ────────────────────────────────────────────────────────────────
       - TRAIN_DATA_DIR=/app/data
-      # ── Model ───────────────────────────────────────────────────────────────
       - TRAIN_MODEL_NAME=prajjwal1/bert-tiny
       - TRAIN_MAX_LENGTH=64
-      # ── Optimisation (edit these to tune) ───────────────────────────────────
       - TRAIN_EPOCHS=5
       - TRAIN_BATCH_SIZE=64
       - TRAIN_EVAL_BATCH_SIZE=128
@@ -49,13 +56,10 @@ services:
       - TRAIN_WARMUP_RATIO=0.1
       - TRAIN_PATIENCE=2
       - TRAIN_GRAD_ACCUM=1
-      # ── GPU ─────────────────────────────────────────────────────────────────
       - TRAIN_USE_AMP=true
       - TRAIN_NUM_WORKERS=0
-      # ── Smoke test (set to e.g. 500 for a quick run) ─────────────────────────
       - TRAIN_SUBSET=0
-    depends_on:
-      - mlflow-server
+    depends_on: [mlflow-server]
     deploy:
       resources:
         reservations:
@@ -63,45 +67,91 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    profiles:
-      - train
+    profiles: [train-pos]
 
-  # ── FastAPI prediction server ─────────────────────────────────────────────
-  api:
-    build: .
+  pos-api:
+    build:
+      context: .
+      dockerfile: projects/pos-classifier/Dockerfile
     image: pos-classifier:latest
     command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     volumes:
-      - db_data:/app/db
-    # MLFLOW_MODEL_NAME is intentionally unset: the model is baked into the
-    # image at model/best_model. Set MLFLOW_MODEL_NAME=pos-classifier (and
-    # add depends_on mlflow-server) only when serving from the model registry.
+      - pos_db_data:/app/db
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 15s
       timeout: 5s
       retries: 3
-    profiles:
-      - serve
+    profiles: [serve-pos]
 
-  # ── Streamlit monitoring dashboard ────────────────────────────────────────
-  dashboard:
-    build: .
+  pos-dashboard:
+    build:
+      context: .
+      dockerfile: projects/pos-classifier/Dockerfile
     image: pos-classifier:latest
     command: ["monitor", "--port", "8501"]
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data:ro
-      - db_data:/app/db
-    depends_on:
-      - api
-    profiles:
-      - serve
+      - ./projects/pos-classifier/data:/app/data:ro
+      - pos_db_data:/app/db
+    depends_on: [pos-api]
+    profiles: [serve-pos]
 
-  # ── Prometheus metrics collector ──────────────────────────────────────────
+  # ══════════════════════════════════════════════════════════════════════════
+  # brand-detector services
+  # ══════════════════════════════════════════════════════════════════════════
+
+  bd-trainer:
+    build:
+      context: .
+      dockerfile: projects/brand-detector/Dockerfile
+    image: brand-detector:latest
+    command: ["train"]
+    volumes:
+      - ./projects/brand-detector/data:/app/data:ro
+      - bd_model_data:/app/model
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - TRAIN_DATA_DIR=/app/data
+    depends_on: [mlflow-server]
+    profiles: [train-bd]
+
+  bd-api:
+    build:
+      context: .
+      dockerfile: projects/brand-detector/Dockerfile
+    image: brand-detector:latest
+    command: ["serve", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    volumes:
+      - bd_db_data:/app/db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/health').raise_for_status()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    profiles: [serve-bd]
+
+  bd-dashboard:
+    build:
+      context: .
+      dockerfile: projects/brand-detector/Dockerfile
+    image: brand-detector:latest
+    command: ["monitor", "--port", "8502"]
+    ports:
+      - "8502:8502"
+    volumes:
+      - ./projects/brand-detector/data:/app/data:ro
+      - bd_db_data:/app/db
+    depends_on: [bd-api]
+    profiles: [serve-bd]
+
+  # ── Shared observability ──────────────────────────────────────────────────
+
   prometheus:
     image: prom/prometheus:latest
     ports:
@@ -113,12 +163,8 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=30d"
-    depends_on:
-      - api
-    profiles:
-      - serve
+    profiles: [serve-pos, serve-bd]
 
-  # ── Grafana dashboard ────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -129,7 +175,5 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SECURITY_ADMIN_USER=admin
       - GF_INSTALL_PLUGINS=
-    depends_on:
-      - prometheus
-    profiles:
-      - serve
+    depends_on: [prometheus]
+    profiles: [serve-pos, serve-bd]

@@ -1,0 +1,20 @@
+[project]
+name = "ml-shared"
+version = "0.1.0"
+description = "Shared utilities for ML projects"
+requires-python = ">=3.11"
+dependencies = [
+    # Lightweight — no torch/transformers. Projects declare those themselves.
+    "fastapi>=0.111.0",
+    "pydantic>=2.7.0",
+    "prometheus-client>=0.20.0",
+    "mlflow>=2.12.0",
+    "protobuf>=3.20.0,<4.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ml_shared"]

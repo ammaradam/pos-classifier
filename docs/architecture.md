@@ -2,7 +2,7 @@
 
 ## Overview
 
-The POS Product Classifier is a text classification library that assigns retail product descriptions to one of five predefined categories. It is structured as an installable Python package with distinct modules for training, serving, and monitoring.
+The POS Product Classifier is a text classification library that assigns retail product descriptions to one of five predefined categories. It is structured as an installable Python package within a uv workspace monorepo, with distinct modules for training, serving, and monitoring. Common utilities (SQLite retry logic, MLflow wrappers, environment helpers) live in the shared `libs/ml-shared` package.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -36,29 +36,37 @@ The POS Product Classifier is a text classification library that assigns retail 
 │                                feedback)                     │  │
 │                                                              │  │
 └──────────────────────────────────────────────────────────────┘
+
+Shared across all projects (libs/ml-shared):
+  ml_shared.db            SQLite write-with-retry
+  ml_shared.mlflow_utils  register_model / transition_model_stage
+  ml_shared.config_base   env_int / env_float / env_bool helpers
+  ml_shared.metrics       Prometheus factory helpers
 ```
 
 ## Module Responsibilities
 
-| Module | File | Responsibility |
+| Module | File (relative to `projects/pos-classifier/`) | Responsibility |
 |--------|------|---------------|
-| Data | `data/preprocessing.py` | CSV parsing, text cleaning, label mapping, `Dataset` class |
-| Config | `config.py` | `TrainingConfig` dataclass, `LABEL_MAP`, `ID_TO_LABEL` |
-| Trainer | `training/trainer.py` | Fine-tuning loop, MLflow logging, model/tokenizer save |
-| Evaluator | `training/evaluate.py` | Accuracy, macro-F1, per-class F1, confusion matrix |
-| Predictor | `serving/predictor.py` | Model loading, batch inference, confidence scoring, SQLite KPI storage, feedback recording |
-| Schema | `serving/schema.py` | Pydantic request/response models, input validation |
-| API | `api/app.py` | FastAPI application, Prometheus counters/histograms |
-| Metrics | `monitoring/metrics.py` | Accuracy vs human-verified labels, DB summary, retraining trigger check |
-| Dashboard | `monitoring/dashboard.py` | Streamlit UI for real-time monitoring |
-| CLI | `__main__.py` | `train \| serve \| monitor \| evaluate` subcommands |
+| Data | `src/pos_classifier/data/preprocessing.py` | CSV parsing, text cleaning, label mapping, `Dataset` class |
+| Config | `src/pos_classifier/config.py` | `TrainingConfig` dataclass, `LABEL_MAP`, `ID_TO_LABEL` |
+| Trainer | `src/pos_classifier/training/trainer.py` | Fine-tuning loop, MLflow logging, model/tokenizer save |
+| Evaluator | `src/pos_classifier/training/evaluate.py` | Accuracy, macro-F1, per-class F1, confusion matrix |
+| Predictor | `src/pos_classifier/serving/predictor.py` | Model loading, batch inference, confidence scoring, SQLite KPI storage via `ml_shared.db`, feedback recording |
+| Schema | `src/pos_classifier/serving/schema.py` | Pydantic request/response models, input validation |
+| API | `src/pos_classifier/api/app.py` | FastAPI application, Prometheus counters/histograms |
+| Metrics | `src/pos_classifier/monitoring/metrics.py` | Accuracy vs human-verified labels, DB summary, retraining trigger check |
+| Dashboard | `src/pos_classifier/monitoring/dashboard.py` | Streamlit UI for real-time monitoring |
+| CLI | `src/pos_classifier/__main__.py` | `train \| serve \| monitor \| evaluate` subcommands |
+| Shared DB | `libs/ml-shared/src/ml_shared/db.py` | SQLite WAL write with exponential-backoff retry (used by Predictor) |
+| Shared MLflow | `libs/ml-shared/src/ml_shared/mlflow_utils.py` | `register_model`, `transition_model_stage` (used by model_registry.py) |
 
 ## Data Flow
 
 ### Training
 
 ```
-Training_data.csv
+projects/pos-classifier/data/Training_data.csv
       │
       ▼
 preprocessing.py     ← clean CSV, strip artifacts, normalise Unicode
@@ -83,7 +91,7 @@ predictor.py         ← tokenize ▶ BERT-tiny forward pass ▶ softmax
       │
       ├── confidence < 0.70 → flagged_for_human_review = True
       ├── random 20% sample → flagged_for_human_review = True
-      └── all predictions stored to predictions.db (SQLite)
+      └── all predictions stored to db/predictions.db (SQLite via ml_shared.db)
       │
       ▼
 PredictResponse      ← {category, confidence, flagged, model_version, predicted_at}
@@ -92,7 +100,7 @@ PredictResponse      ← {category, confidence, flagged, model_version, predicte
 ### Monitoring & Feedback Loop
 
 ```
-Query_and_Validation_data.csv (4,688 rows)
+data/Query_and_Validation_data.csv (4,688 rows)
               │
               ▼
 compute_validation_metrics()
@@ -133,10 +141,10 @@ compute_validation_metrics()
 | Experiment tracking | MLflow (local `mlruns/`) | Open source, self-hosted, no external service needed |
 | Serving | FastAPI + Uvicorn | Async, auto-docs, Pydantic native, production standard |
 | Schema validation | Pydantic v2 | Type-safe, integrates seamlessly with FastAPI |
-| KPI storage | SQLite (`predictions.db`) | Zero infrastructure for the exercise; swap to Postgres for production |
+| KPI storage | SQLite (`db/predictions.db`) | Zero infrastructure for the exercise; swap to Postgres for production |
 | Monitoring | Prometheus client + Streamlit | Prometheus for time-series metrics; Streamlit for fast dashboard iteration |
-| Packaging | `uv` + `hatchling` (src layout) | Fast dependency resolution; clean project structure |
-| Containerisation | Docker (multi-stage) | Minimal runtime image; dependencies cached in separate layer |
+| Packaging | `uv` workspace + `hatchling` (src layout) | Single lock file across projects; shared utilities in `ml-shared` |
+| Containerisation | Docker (pytorch base image) | Pre-installed torch; dependencies cached in separate layer |
 
 ## Class Imbalance Strategy
 
@@ -157,4 +165,4 @@ Every prediction exposes a `confidence` score (max softmax probability). Two com
 1. **Low-confidence threshold** (`< 0.70`): Model is genuinely uncertain — always flag.
 2. **Random 20% sample**: Even high-confidence predictions get spot-checked, creating a representative human-verified stream for accuracy tracking.
 
-Both types are stored in `predictions.db` with `flagged_for_review = 1` and surface in the Streamlit queue view.
+Both types are stored in `db/predictions.db` with `flagged_for_review = 1` and surface in the Streamlit queue view.

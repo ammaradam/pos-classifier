@@ -1,0 +1,64 @@
+[project]
+name = "pos-classifier"
+version = "0.1.0"
+description = "POS product description classifier — fine-tuned BERT-tiny with FastAPI serving and MLflow tracking"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ml-shared",
+    # ML core (torch/torchvision provided by Docker base image or installed separately)
+    "transformers>=4.40.0",
+    "accelerate>=0.29.0",
+    "scikit-learn>=1.4.0",
+    # Experiment tracking
+    "mlflow>=2.12.0",
+    # Pin protobuf to <5 — opentelemetry-proto 1.x generates pb2 files
+    # incompatible with protobuf 5+/7+ (upstream bug in otel-proto grpc stubs)
+    "protobuf>=3.20.0,<4.0.0",
+    # Serving
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+    # Monitoring
+    "prometheus-client>=0.20.0",
+    "streamlit>=1.34.0",
+    "plotly>=5.22.0",
+    # Data
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    # Utilities
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "ipykernel>=7.2.0",
+]
+
+# torch is NOT in the workspace lock — install separately based on your hardware:
+#   CPU:  uv pip install torch torchvision --index https://download.pytorch.org/whl/cpu
+#   GPU:  uv pip install torch torchvision==0.21.0 --index https://download.pytorch.org/whl/cu124
+# In Docker the pytorch/pytorch base image provides torch pre-installed.
+
+[project.scripts]
+pos-classifier = "pos_classifier.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pos_classifier"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[tool.uv.sources]
+ml-shared = { workspace = true }

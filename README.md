@@ -2,6 +2,20 @@
 
 An end-to-end machine learning service prototype that classifies retail Point-of-Sale (POS) product descriptions into predefined product groups. Built on fine-tuned BERT-tiny, with FastAPI serving, MLflow experiment tracking, Prometheus monitoring, and a Streamlit dashboard.
 
+## Repository Layout
+
+This is a **uv workspace monorepo** with two ML projects and a shared utilities library:
+
+```
+├── libs/ml-shared/          shared utilities (config helpers, SQLite retry, MLflow wrappers)
+├── projects/pos-classifier/ this project — trained model, API, dashboard, tests
+├── projects/brand-detector/ scaffold for a second ML project
+├── pyproject.toml           workspace root (no [project] section)
+└── uv.lock                  single lock file for all workspace members
+```
+
+> **Note:** torch/torchvision are excluded from the workspace lock due to the CPU/GPU dual-index constraint across multiple workspace members. Install torch separately (see Install section) or use Docker (the `pytorch/pytorch` base image provides it).
+
 ## Problem
 
 Retail POS data contains free-text product descriptions that must be mapped to a taxonomy of product groups. This service automates classification, logs predictions, sends low-confidence and sampled predictions for human review, and feeds verified labels back into a retraining loop.
@@ -41,17 +55,27 @@ See [docs/architecture.md](docs/architecture.md) for the full system diagram and
 ```bash
 # Requires Python 3.11+
 pip install uv
-uv sync --extra cpu
-uv pip install -e .
+
+# Sync workspace (all non-torch deps)
+uv sync
+
+# Install torch separately — CPU:
+uv pip install torch torchvision --index https://download.pytorch.org/whl/cpu
+
+# or GPU (CUDA 12.4):
+uv pip install torch torchvision==0.21.0 --index https://download.pytorch.org/whl/cu124
 ```
 
-Expected local data files:
+Expected local data files (relative to `projects/pos-classifier/`):
 - `data/Training_data.csv` for model training
 - `data/Query_and_Validation_data.csv` for validation, monitoring, and dashboard metrics
 
 ### 2. Train
 
 ```bash
+# Run from the projects/pos-classifier/ directory
+cd projects/pos-classifier
+
 python -m pos_classifier train \
   --data-dir data \
   --epochs 5
@@ -69,6 +93,7 @@ mlflow ui   # → http://localhost:5000
 ### 3. Serve
 
 ```bash
+cd projects/pos-classifier
 python -m pos_classifier serve --port 8000
 # → http://localhost:8000/docs  (Swagger UI)
 ```
@@ -107,15 +132,15 @@ curl -X POST http://localhost:8000/feedback \
 
 ### 4. Evaluate
 
-Compute accuracy against the human-verified subset of the query data:
-
 ```bash
+cd projects/pos-classifier
 python -m pos_classifier evaluate --data-dir data
 ```
 
 ### 5. Monitor
 
 ```bash
+cd projects/pos-classifier
 python -m pos_classifier monitor --port 8501
 # → http://localhost:8501
 ```
@@ -151,94 +176,56 @@ python -m pos_classifier train --epochs 5
 
 ### Manual registration (if needed)
 
-If you need to register a model from an existing run without retraining:
-
 ```bash
 # List MLflow runs
 mlflow ui  # → http://localhost:5000
 
 # Get the run_id, then:
 python -m pos_classifier register --run-id <run_id> --description "Model description"
-
-# Output:
-# ✓ Model registered successfully!
-#   Name    : pos-classifier
-#   Version : 2
-#   Stage   : None
-#
-# All versions:
-#   v1  | Production | 1737461234000
-#   v2  | None       | 1737461567000
 ```
 
-### Promote to Staging
-
-After registering, validate the model on a subset of query data, then promote to **Staging**:
+### Promote to Staging / Production
 
 ```bash
-python -m pos_classifier evaluate --data-dir data
-# Check the per-class accuracy metrics
-
-# If metrics look good:
 python -m pos_classifier transition --version 2 --stage Staging
-
-# Output:
-# ✓ Model transitioned successfully!
-#   Name    : pos-classifier
-#   Version : 2
-#   Stage   : Staging
-```
-
-### Promote to Production
-
-Once validated in Staging, promote to **Production**:
-
-```bash
 python -m pos_classifier transition --version 2 --stage Production
-
-# ✓ Model transitioned successfully!
-#   Name    : pos-classifier
-#   Version : 2
-#   Stage   : Production
-```
-
-The local API loads the model artifact from `model/best_model` on startup. In production, the serving deployment should fetch the approved **Production** model version from the registry or object storage before pods become ready.
-
-### View all model versions
-
-```bash
-mlflow ui  # → http://localhost:5000
-# Browse Models → pos-classifier → see all versions, stages, metrics
 ```
 
 ---
 
 ## Docker
 
+All Docker commands use the **repo root** as the build context (so the image can access `libs/ml-shared/`). Dockerfiles live inside each project directory.
+
 ```bash
-# Build once
-docker build -t pos-classifier .
+# Build the pos-classifier image (from repo root)
+docker build -f projects/pos-classifier/Dockerfile -t pos-classifier .
 
 # Train
-docker run -v $(pwd)/data:/app/data -v model_vol:/app/model \
-  pos-classifier train --data-dir /app/data
+docker run -v $(pwd)/projects/pos-classifier/data:/app/data \
+           -v model_vol:/app/model \
+           pos-classifier train --data-dir /app/data
 
 # Serve
-docker run -p 8000:8000 -v model_vol:/app/model pos-classifier serve
+docker run -p 8000:8000 pos-classifier serve
 
 # Monitor
-docker run -p 8501:8501 -v $(pwd)/data:/app/data -v model_vol:/app/model \
-  pos-classifier monitor
+docker run -p 8501:8501 \
+           -v $(pwd)/projects/pos-classifier/data:/app/data \
+           pos-classifier monitor
 ```
 
-Or use Docker Compose:
+Or use Docker Compose (profiles are project-scoped):
 
 ```bash
-# Train (exits when done)
-docker compose --profile train up trainer
+# Train pos-classifier (exits when done)
+docker compose --profile train-pos up pos-trainer
 
-# Serve API + dashboard
-docker compose --profile serve up
+# Serve pos-classifier API + dashboard
+docker compose --profile serve-pos up
+
+# Serve both projects simultaneously
+docker compose --profile serve-pos --profile serve-bd up
 ```
 
 ## API Reference
@@ -267,17 +254,13 @@ The API enforces a strict data contract via Pydantic schemas:
 - Batch prediction: `BatchPredictResponse` with results array and total count
 
 **Feedback validation:**
-- `corrected_category` must be one of the 5 defined labels (validated at the Predictor layer, not API layer)
+- `corrected_category` must be one of the 5 defined labels (validated at the Predictor layer)
 - Invalid categories return `422 Unprocessable Entity` with list of valid options
 
 **Contract export:**
 ```bash
 curl http://localhost:8000/contract > openapi.json
 ```
-This endpoint returns the full OpenAPI 3.1.0 schema, enabling downstream teams to:
-- Generate type-safe client SDKs (e.g., OpenAPI Generator)
-- Detect breaking changes in API updates
-- Validate payloads offline before submission
 
 ### Monitoring & Error Tracking
 
@@ -296,37 +279,55 @@ rate(pos_classifier_validation_errors_total[5m])
 ## Project Structure
 
 ```
-src/pos_classifier/
-├── __init__.py
-├── __main__.py          ← CLI: train | serve | monitor | evaluate
-├── config.py            ← TrainingConfig dataclass + label maps
-├── data/
-│   └── preprocessing.py ← CSV loading, cleaning, tokenization
-├── training/
-│   ├── trainer.py       ← Fine-tuning loop + MLflow logging
-│   └── evaluate.py      ← Metrics: accuracy, F1, confusion matrix
-├── serving/
-│   ├── predictor.py     ← Model inference + SQLite KPI storage
-│   └── schema.py        ← Pydantic request/response models
-├── monitoring/
-│   ├── metrics.py       ← Accuracy vs human labels, DB summary
-│   └── dashboard.py     ← Streamlit monitoring dashboard
-└── api/
-    └── app.py           ← FastAPI application
-
-tests/
-├── test_preprocessing.py
-├── test_schema.py
-└── test_api.py
-
-docs/
-├── architecture.md          ← System design + data flow diagrams
-└── deployment_flowchart.md  ← Kubernetes + GCP deployment design
+├── libs/
+│   └── ml-shared/               shared utilities (no torch dependency)
+│       └── src/ml_shared/
+│           ├── config_base.py   env_int / env_float / env_bool helpers
+│           ├── db.py            SQLite write-with-retry
+│           ├── mlflow_utils.py  register_model / transition_model_stage
+│           └── metrics.py      Prometheus factory helpers
+│
+├── projects/
+│   ├── pos-classifier/
+│   │   ├── src/pos_classifier/
+│   │   │   ├── __main__.py      CLI: train | serve | monitor | evaluate
+│   │   │   ├── config.py        TrainingConfig dataclass + label maps
+│   │   │   ├── data/
+│   │   │   │   └── preprocessing.py  CSV loading, cleaning, tokenization
+│   │   │   ├── training/
+│   │   │   │   ├── trainer.py   Fine-tuning loop + MLflow logging
+│   │   │   │   └── evaluate.py  Metrics: accuracy, F1, confusion matrix
+│   │   │   ├── serving/
+│   │   │   │   ├── predictor.py Model inference + SQLite KPI storage
+│   │   │   │   └── schema.py    Pydantic request/response models
+│   │   │   ├── monitoring/
+│   │   │   │   ├── metrics.py   Accuracy vs human labels, DB summary
+│   │   │   │   └── dashboard.py Streamlit monitoring dashboard
+│   │   │   └── api/
+│   │   │       └── app.py       FastAPI application
+│   │   ├── tests/
+│   │   ├── data/
+│   │   ├── model/best_model/
+│   │   ├── notebooks/eda.ipynb
+│   │   └── Dockerfile
+│   │
+│   └── brand-detector/          second project scaffold
+│       ├── src/brand_detector/
+│       └── Dockerfile
+│
+├── pyproject.toml               workspace root
+├── uv.lock
+└── docker-compose.yml
 ```
 
 ## Tests
 
 ```bash
+# Run from repo root
+uv run pytest projects/pos-classifier -v
+
+# Or from inside the project
+cd projects/pos-classifier
 uv run pytest tests/ -v
 ```
 
@@ -336,7 +337,7 @@ uv run pytest tests/ -v
 |----------|-------|
 | Base model | `prajjwal1/bert-tiny` |
 | Parameters | 4.4 million |
-| Max sequence length | 64 tokens during training; serving pads to 128 tokens |
+| Max sequence length | 64 tokens |
 | Training data | ~42,000 rows (after cleaning) |
 | Split | 80% train / 10% val / 10% test |
 | Optimizer | AdamW, lr=2e-5, weight_decay=0.01 |
@@ -346,7 +347,7 @@ uv run pytest tests/ -v
 
 ## Configuration
 
-All training hyperparameters are exposed via `TrainingConfig` in [config.py](src/pos_classifier/config.py) and as CLI flags:
+All training hyperparameters are exposed via `TrainingConfig` in [projects/pos-classifier/src/pos_classifier/config.py](projects/pos-classifier/src/pos_classifier/config.py) and as CLI flags:
 
 ```bash
 python -m pos_classifier train --help
@@ -354,6 +355,8 @@ python -m pos_classifier train --help
 
 Key environment variables:
 - `MLFLOW_TRACKING_URI` — MLflow server URI (default: `mlruns/`)
+- `TRAIN_DATA_DIR` — path to training data directory
+- `DB_DIR` — path for SQLite predictions database (default: `db/`)
 
 ## Deployment
 

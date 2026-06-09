@@ -3,6 +3,11 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
+from ml_shared.config_base import env_bool as _env_bool
+from ml_shared.config_base import env_float as _env_float
+from ml_shared.config_base import env_int as _env_int
 
 
 LABEL_MAP: dict[str, int] = {
@@ -14,19 +19,6 @@ LABEL_MAP: dict[str, int] = {
 }
 ID_TO_LABEL: dict[int, str] = {v: k for k, v in LABEL_MAP.items()}
 NUM_LABELS: int = len(LABEL_MAP)
-
-
-def _env_int(key: str, default: int) -> int:
-    return int(os.getenv(key, str(default)))
-
-def _env_float(key: str, default: float) -> float:
-    return float(os.getenv(key, str(default)))
-
-def _env_bool(key: str, default: bool) -> bool:
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    return raw.lower() not in {"0", "false", "no", "off"}
 
 
 @dataclass
@@ -45,7 +37,7 @@ class TrainingConfig:
     # It uses the identical WordPiece vocabulary as bert-base-uncased, so we
     # load the tokenizer from there and save it alongside the fine-tuned weights.
     tokenizer_name: str = "bert-base-uncased"
-    model_revision: str = ""
+    model_revision: Optional[str] = None
     # p99 token count in training data is ~20; 64 covers 100% with 3× headroom
     # and halves BERT's O(n²) attention cost vs the previous 128 default.
     max_length: int = field(default_factory=lambda: _env_int("TRAIN_MAX_LENGTH", 64))
